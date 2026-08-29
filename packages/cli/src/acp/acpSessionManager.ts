@@ -48,6 +48,13 @@ export class AcpSessionManager {
     return this.sessions.get(sessionId);
   }
 
+  dispose(): void {
+    for (const session of this.sessions.values()) {
+      session.dispose();
+    }
+    this.sessions.clear();
+  }
+
   async newSession(
     { cwd, mcpServers }: acp.NewSessionRequest,
     authDetails: AuthDetails,
@@ -62,7 +69,10 @@ export class AcpSessionManager {
     );
 
     const authType =
-      loadedSettings.merged.security.auth.selectedType || AuthType.USE_GEMINI;
+      loadedSettings.merged.security.auth.selectedType ||
+      (authDetails.baseUrl || process.env['GOOGLE_GEMINI_BASE_URL']
+        ? AuthType.GATEWAY
+        : AuthType.USE_GEMINI);
 
     let isAuthenticated = false;
     let authErrorMessage = '';
@@ -183,6 +193,12 @@ export class AcpSessionManager {
       this.connection,
       this.settings,
     );
+
+    const existingSession = this.sessions.get(sessionId);
+    if (existingSession) {
+      existingSession.dispose();
+    }
+
     this.sessions.set(sessionId, session);
 
     // Stream history back to client
@@ -218,7 +234,12 @@ export class AcpSessionManager {
     mcpServers: acp.McpServer[],
     authDetails: AuthDetails,
   ): Promise<Config> {
-    const selectedAuthType = this.settings.merged.security.auth.selectedType;
+    const selectedAuthType =
+      this.settings.merged.security.auth.selectedType ||
+      (authDetails.baseUrl || process.env['GOOGLE_GEMINI_BASE_URL']
+        ? AuthType.GATEWAY
+        : undefined);
+
     if (!selectedAuthType) {
       throw acp.RequestError.authRequired();
     }

@@ -1531,6 +1531,121 @@ describe('PolicyEngine', () => {
       expect(result.decision).toBe(PolicyDecision.ALLOW);
     });
 
+    it('should NOT upgrade Git commands to ALLOW in untrusted workspace', async () => {
+      const isTrustedMock = vi.fn().mockReturnValue(false);
+      const engine = new PolicyEngine({
+        isTrustedFolder: isTrustedMock,
+      });
+
+      const result = await engine.check(
+        {
+          name: 'run_shell_command',
+          args: { command: 'git status' },
+        },
+        undefined,
+      );
+
+      expect(result.decision).toBe(PolicyDecision.ASK_USER);
+      expect(isTrustedMock).toHaveBeenCalled();
+    });
+
+    it('should NOT treat commands with git in arguments or URLs as Git commands', async () => {
+      const isTrustedMock = vi.fn().mockReturnValue(false);
+      const engine = new PolicyEngine({
+        isTrustedFolder: isTrustedMock,
+      });
+
+      const result = await engine.check(
+        {
+          name: 'run_shell_command',
+          args: { command: 'echo git' },
+        },
+        undefined,
+      );
+
+      expect(result.decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('should detect chained Git commands as Git commands and force ASK_USER in untrusted workspaces', async () => {
+      const isTrustedMock = vi.fn().mockReturnValue(false);
+      const engine = new PolicyEngine({
+        isTrustedFolder: isTrustedMock,
+      });
+
+      const result = await engine.check(
+        {
+          name: 'run_shell_command',
+          args: { command: 'echo "hello" && git status' },
+        },
+        undefined,
+      );
+
+      expect(result.decision).toBe(PolicyDecision.ASK_USER);
+      expect(isTrustedMock).toHaveBeenCalled();
+    });
+
+    it('should detect Git commands prefixed with environment variable assignments', async () => {
+      const isTrustedMock = vi.fn().mockReturnValue(false);
+      const engine = new PolicyEngine({
+        isTrustedFolder: isTrustedMock,
+      });
+
+      const result = await engine.check(
+        {
+          name: 'run_shell_command',
+          args: { command: 'VAR=val git status' },
+        },
+        undefined,
+      );
+
+      expect(result.decision).toBe(PolicyDecision.ASK_USER);
+      expect(isTrustedMock).toHaveBeenCalled();
+    });
+
+    it('should NOT upgrade a DENY decision to ASK_USER for Git commands in untrusted workspaces', async () => {
+      const isTrustedMock = vi.fn().mockReturnValue(false);
+      const rules: PolicyRule[] = [
+        {
+          toolName: 'run_shell_command',
+          argsPattern: /"command":"git status"/,
+          decision: PolicyDecision.DENY,
+          priority: 100,
+        },
+      ];
+      const engine = new PolicyEngine({
+        rules,
+        isTrustedFolder: isTrustedMock,
+      });
+
+      const result = await engine.check(
+        {
+          name: 'run_shell_command',
+          args: { command: 'git status' },
+        },
+        undefined,
+      );
+
+      expect(result.decision).toBe(PolicyDecision.DENY);
+    });
+
+    it('should upgrade Git commands to ALLOW in trusted workspace when heuristics apply', async () => {
+      const isTrustedMock = vi.fn().mockReturnValue(true);
+      const engine = new PolicyEngine({
+        isTrustedFolder: isTrustedMock,
+      });
+
+      const result = await engine.check(
+        {
+          name: 'run_shell_command',
+          args: { command: 'git status' },
+        },
+        undefined,
+      );
+
+      expect(result.decision).toBe(PolicyDecision.ALLOW);
+      expect(isTrustedMock).toHaveBeenCalled();
+    });
+
     it('should respect explicit DENY for compound commands even if parts are allowed', async () => {
       const rules: PolicyRule[] = [
         {
@@ -1896,6 +2011,30 @@ describe('PolicyEngine', () => {
 
       // Even though the command is flagged as dangerous, YOLO mode should preserve the ALLOW decision
       expect(result.decision).toBe(PolicyDecision.ALLOW);
+    });
+
+    it('should NOT downgrade to ASK_USER for redirected commands in YOLO mode even without sandbox', async () => {
+      const rules: PolicyRule[] = [
+        {
+          toolName: 'run_shell_command',
+          decision: PolicyDecision.ALLOW,
+          priority: 10,
+        },
+      ];
+
+      engine = new PolicyEngine({
+        rules,
+        approvalMode: ApprovalMode.YOLO,
+        sandboxManager: new NoopSandboxManager(),
+      });
+
+      const command = 'npm test 2>&1 | tail -80';
+      const { decision } = await engine.check(
+        { name: 'run_shell_command', args: { command } },
+        undefined,
+      );
+
+      expect(decision).toBe(PolicyDecision.ALLOW);
     });
 
     it('should return ALLOW in YOLO mode even if shell command parsing fails', async () => {
@@ -3066,12 +3205,6 @@ describe('PolicyEngine', () => {
             modes: [ApprovalMode.PLAN],
           },
           {
-            toolName: 'save_memory',
-            decision: PolicyDecision.ASK_USER,
-            priority: 70,
-            modes: [ApprovalMode.PLAN],
-          },
-          {
             toolName: 'exit_plan_mode',
             decision: PolicyDecision.ASK_USER,
             priority: 70,
@@ -3115,7 +3248,6 @@ describe('PolicyEngine', () => {
         'web_fetch',
         'write_todos',
         'memory',
-        'save_memory',
         'mcp_mcp-server_read_tool',
         'mcp_mcp-server_write_tool',
       ]);
@@ -3151,7 +3283,6 @@ describe('PolicyEngine', () => {
       expect(excluded.has('web_fetch')).toBe(false);
       expect(excluded.has('ask_user')).toBe(false);
       expect(excluded.has('exit_plan_mode')).toBe(false);
-      expect(excluded.has('save_memory')).toBe(false);
       // Read-only MCP tool allowed by annotation rule (matched via _serverName)
       expect(excluded.has('mcp_mcp-server_read_tool')).toBe(false);
     });

@@ -407,7 +407,7 @@ describe('Scheduler (Orchestrator)', () => {
         expect.arrayContaining([
           expect.objectContaining({
             status: CoreToolCallStatus.Validating,
-            request: req1,
+            request: expect.objectContaining(req1),
             tool: mockTool,
             invocation: mockInvocation,
             schedulerId: ROOT_SCHEDULER_ID,
@@ -630,8 +630,8 @@ describe('Scheduler (Orchestrator)', () => {
         CoreToolCallStatus.Cancelled,
         'Operation cancelled by user',
       );
-      // finalizeCall is handled by the processing loop, not synchronously by cancelAll
-      // expect(mockStateManager.finalizeCall).toHaveBeenCalledWith('call-1');
+      // finalizeCall is called synchronously by cancelAll to ensure completedBatch is populated and isActive is updated immediately
+      expect(mockStateManager.finalizeCall).toHaveBeenCalledWith('call-1');
       expect(mockStateManager.cancelAllQueued).toHaveBeenCalledWith(
         'Operation cancelled by user',
       );

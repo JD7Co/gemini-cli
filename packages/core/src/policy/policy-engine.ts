@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { type FunctionCall } from '@google/genai';
 import {
   SHELL_TOOL_NAMES,
@@ -45,6 +46,41 @@ import {
   NoopSandboxManager,
   type SandboxPermissions,
 } from '../services/sandboxManager.js';
+
+function containsGitCommand(args: string[]): boolean {
+  if (!args || args.length === 0) return false;
+  const allowedPredecessors = new Set([
+    'sudo',
+    'env',
+    'time',
+    '&&',
+    '||',
+    ';',
+    '|',
+    '&',
+    '(',
+    '\\n',
+  ]);
+  return args.some((arg, index) => {
+    const trimmed = arg.trim();
+    if (!trimmed) return false;
+    const basename = path.basename(trimmed).toLowerCase();
+    if (basename !== 'git' && basename !== 'git.exe') {
+      return false;
+    }
+    let prevIndex = index - 1;
+    while (prevIndex >= 0 && /^[a-zA-Z_][a-zA-Z0-9_]*=/.test(args[prevIndex])) {
+      prevIndex--;
+    }
+    if (prevIndex >= 0) {
+      const prev = args[prevIndex].toLowerCase();
+      if (!allowedPredecessors.has(prev)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
 
 function isWildcardPattern(name: string): boolean {
   return name === '*' || name.includes('*');
@@ -205,6 +241,7 @@ export class PolicyEngine {
   private readonly checkerRunner?: CheckerRunner;
   private approvalMode: ApprovalMode;
   private readonly sandboxManager: SandboxManager;
+  private readonly isTrustedFolderFn?: () => boolean;
 
   constructor(config: PolicyEngineConfig = {}, checkerRunner?: CheckerRunner) {
     this.rules = (config.rules ?? []).sort(
@@ -258,6 +295,14 @@ export class PolicyEngine {
     this.checkerRunner = checkerRunner;
     this.approvalMode = config.approvalMode ?? ApprovalMode.DEFAULT;
     this.sandboxManager = config.sandboxManager ?? new NoopSandboxManager();
+    this.isTrustedFolderFn = config.isTrustedFolder;
+  }
+
+  isTrustedFolder(): boolean {
+    if (this.isTrustedFolderFn) {
+      return this.isTrustedFolderFn();
+    }
+    return true;
   }
 
   /**
@@ -288,12 +333,11 @@ export class PolicyEngine {
     if (allowRedirection) return false;
     if (!hasRedirection(command)) return false;
 
-    // Do not downgrade (do not ask user) if sandboxing is enabled and in AUTO_EDIT or YOLO
-    const sandboxEnabled = !(this.sandboxManager instanceof NoopSandboxManager);
+    // Do not downgrade (do not ask user) if in AUTO_EDIT or YOLO mode.
+    // These modes trust the agent's actions (YOLO) or specific task (AUTO_EDIT).
     if (
-      sandboxEnabled &&
-      (this.approvalMode === ApprovalMode.AUTO_EDIT ||
-        this.approvalMode === ApprovalMode.YOLO)
+      this.approvalMode === ApprovalMode.AUTO_EDIT ||
+      this.approvalMode === ApprovalMode.YOLO
     ) {
       return false;
     }
@@ -308,10 +352,20 @@ export class PolicyEngine {
     command: string,
     decision: PolicyDecision,
   ): Promise<PolicyDecision> {
+    if (decision === PolicyDecision.DENY) {
+      return PolicyDecision.DENY;
+    }
     await initializeShellParsers();
     try {
       const parsedObjArgs = shellParse(command);
       const parsedArgs = parsedObjArgs.map(extractStringFromParseEntry);
+
+      if (containsGitCommand(parsedArgs) && !this.isTrustedFolder()) {
+        debugLogger.debug(
+          `[PolicyEngine.check] Git command evaluated in untrusted workspace. Forcing ASK_USER: ${command}`,
+        );
+        return PolicyDecision.ASK_USER;
+      }
 
       if (this.sandboxManager.isDangerousCommand(parsedArgs)) {
         if (this.approvalMode === ApprovalMode.YOLO) {
@@ -331,6 +385,13 @@ export class PolicyEngine {
         this.sandboxManager.isKnownSafeCommand(parsedArgs) &&
         decision === PolicyDecision.ASK_USER
       ) {
+        if (containsGitCommand(parsedArgs) && !this.isTrustedFolder()) {
+          debugLogger.debug(
+            `[PolicyEngine.check] Known safe Git command evaluated in untrusted workspace. Preserving ASK_USER: ${command}`,
+          );
+          return PolicyDecision.ASK_USER;
+        }
+
         debugLogger.debug(
           `[PolicyEngine.check] Command evaluated as known safe, overriding ASK_USER to ALLOW: ${command}`,
         );
